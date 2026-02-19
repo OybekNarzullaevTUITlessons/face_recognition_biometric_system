@@ -4,30 +4,28 @@ import numpy as np
 import torch
 from facenet_pytorch import MTCNN, InceptionResnetV1
 
-# ========= CONFIG =========
 DATASET_DIR = "dataset"
-THRESHOLD = 0.90  # xavfsizlik darajasi
-# ==========================
+THRESHOLD = 0.90
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[INFO] Device: {device}")
 
-# Models
 mtcnn = MTCNN(image_size=160, margin=20, device=device)
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
 
 def l2_normalize(x):
-    return x / np.linalg.norm(x)
+    return x / (np.linalg.norm(x) + 1e-10)
 
 
 def cosine_similarity(a, b):
-    return np.dot(a, b)
+    return float(np.dot(a, b))
 
 
-# ======== 1. Datasetdan embedding yuklash ========
+# ==========================
+# 1. DATABASE YUKLASH
+# ==========================
 print("[INFO] Embeddings yuklanmoqda...")
-
 database = {}
 
 for person in os.listdir(DATASET_DIR):
@@ -54,17 +52,19 @@ for person in os.listdir(DATASET_DIR):
                 embeddings.append(emb)
 
     if embeddings:
-        database[person] = np.mean(embeddings, axis=0)
+        database[person] = l2_normalize(np.mean(embeddings, axis=0))
 
 print(f"[INFO] {len(database)} ta foydalanuvchi yuklandi")
 
-if len(database) == 0:
+if not database:
     print("Dataset bo‘sh!")
     exit()
 
-# ======== 2. Kamera ========
-cap = cv2.VideoCapture(0)
 
+# ==========================
+# 2. REAL-TIME TANISH
+# ==========================
+cap = cv2.VideoCapture(0)
 print("[INFO] Q bilan chiqish mumkin")
 
 while True:
@@ -73,51 +73,36 @@ while True:
         break
 
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    boxes, _ = mtcnn.detect(rgb)
+
+    # To‘g‘ridan-to‘g‘ri aligned face olish
+    face_tensor, prob = mtcnn(rgb, return_prob=True)
 
     name = "UNKNOWN"
 
-    if boxes is not None:
-        for box in boxes:
-            x1, y1, x2, y2 = map(int, box)
-            face = frame[y1:y2, x1:x2]
+    if face_tensor is not None and prob > 0.90:
+        face_tensor = face_tensor.unsqueeze(0).to(device)
 
-            try:
-                face = cv2.resize(face, (160, 160))
-            except:
-                continue
+        with torch.no_grad():
+            emb = resnet(face_tensor).cpu().numpy().flatten()
+            emb = l2_normalize(emb)
 
-            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            face_tensor = mtcnn(face_rgb)
+        best_score = 0
+        best_match = None
 
-            if face_tensor is not None:
-                face_tensor = face_tensor.unsqueeze(0).to(device)
-                with torch.no_grad():
-                    emb = resnet(face_tensor).cpu().numpy().flatten()
-                    emb = l2_normalize(emb)
+        for person, db_emb in database.items():
+            score = cosine_similarity(emb, db_emb)
+            if score > best_score:
+                best_score = score
+                best_match = person
 
-                best_score = 0
-                best_match = None
+        if best_score > THRESHOLD:
+            name = f"WELCOME {best_match}"
 
-                for person, db_emb in database.items():
-                    score = cosine_similarity(emb, db_emb)
-                    if score > best_score:
-                        best_score = score
-                        best_match = person
+    color = (0, 255, 0) if "WELCOME" in name else (0, 0, 255)
 
-                if best_score > THRESHOLD:
-                    name = f"WELCOME {best_match}"
-                else:
-                    name = "UNKNOWN"
-
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-    cv2.putText(frame, name,
-                (30, 40),
+    cv2.putText(frame, name, (30, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0) if "WELCOME" in name else (0, 0, 255),
-                2)
+                1, color, 2)
 
     cv2.imshow("Real-Time Login Demo", frame)
 
